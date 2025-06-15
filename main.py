@@ -1,24 +1,28 @@
 # main.py
 import sys
 import os
+import traceback
 
-# Ensure the src directory is in the Python path
-# This allows the scripts inside 'src' to find each other.
+# This is a standard practice to ensure that modules inside the 'src' directory
+# can be imported correctly, regardless of where you run the script from.
 sys.path.append(os.path.abspath('src'))
 
-# Now we can import the Engine class
+# We import our core Engine class.
 from engine import Engine
 
 if __name__ == "__main__":
-    print("Starting PEACE Engine...")
+    print("Initializing the PEACE Engine...")
     try:
-        # Create and run the engine
-        peace_engine = Engine(1280, 720)
+        # We create an instance of our engine with a specified window resolution.
+        peace_engine = Engine(1920, 1080)
+        # We start the main loop of the engine.
         peace_engine.run()
     except Exception as e:
-        print(f"An unhandled exception occurred in the engine: {e}")
-        # In a real build, you would log this to a file
-        import traceback
+        # Robust error handling is critical in complex applications.
+        # This will catch any uncaught exceptions from the engine's loop,
+        # print a detailed traceback, and ensure the application exits gracefully.
+        print(f"\nA fatal error occurred in the PEACE Engine: {e}")
         traceback.print_exc()
     finally:
-        print("PEACE Engine has shut down.")
+        # This message confirms that the engine has completed its lifecycle.
+        print("\nPEACE Engine has shut down.")

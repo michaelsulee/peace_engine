@@ -1,52 +1,45 @@
 # src/camera.py
-import pygame
-import numpy as np
-import math_utils
+from pyrr import Vector3, Matrix44, vector, vector3, matrix44
+import math
 
 class Camera:
-    def __init__(self, position=(0, 2, 5), fov=45, aspect=1280/720, near=0.1, far=500.0):
-        # Starts at (0,2,5), looking towards the origin where the cube is.
-        self.position = np.array(position, dtype=np.float32)
-        self.front = np.array([0, 0, -1], dtype=np.float32)
-        self.up = np.array([0, 1, 0], dtype=np.float32)
-        self.right = np.array([1, 0, 0], dtype=np.float32)
-        self.world_up = np.array([0, 1, 0], dtype=np.float32)
-
+    def __init__(self, position: Vector3, aspect_ratio: float):
+        self.position = position
+        self.front = Vector3([0.0, 0.0, -1.0])
+        self.up = Vector3([0.0, 1.0, 0.0])
+        self.world_up = Vector3([0.0, 1.0, 0.0])
+        self.right = vector.normalise(vector3.cross(self.front, self.world_up))
         self.yaw = -90.0
         self.pitch = 0.0
-
-        self.move_speed = 5.0
+        self.movement_speed = 5.0
         self.mouse_sensitivity = 0.1
-
-        self.update_vectors()
-
-    def get_view_matrix(self):
-        return math_utils.look_at(self.position, self.position + self.front, self.up)
-    
-    def update_vectors(self):
-        front = np.zeros(3, dtype=np.float32)
-        front[0] = np.cos(np.radians(self.yaw)) * np.cos(np.radians(self.pitch))
-        front[1] = np.sin(np.radians(self.pitch))
-        front[2] = np.sin(np.radians(self.yaw)) * np.cos(np.radians(self.pitch))
-        self.front = math_utils._normalize(front)
-        self.right = math_utils._normalize(np.cross(self.front, self.world_up))
-        self.up = math_utils._normalize(np.cross(self.right, self.front))
-
-    def process_keyboard(self, dt):
-        keys = pygame.key.get_pressed()
-        velocity = self.move_speed * dt
-        if keys[pygame.K_w]: self.position += self.front * velocity
-        if keys[pygame.K_s]: self.position -= self.front * velocity
-        if keys[pygame.K_a]: self.position -= self.right * velocity
-        if keys[pygame.K_d]: self.position += self.right * velocity
-        if keys[pygame.K_SPACE]: self.position += self.world_up * velocity
-        if keys[pygame.K_LSHIFT]: self.position -= self.world_up * velocity
-
-    def process_mouse_movement(self, x_offset, y_offset, constrain_pitch=True):
+        self.fov = 45.0
+        self.near_plane = 0.1
+        self.far_plane = 1000.0 # Increased far plane for larger scene
+        self.aspect_ratio = aspect_ratio
+        self.update_camera_vectors()
+    def get_view_matrix(self) -> Matrix44:
+        return matrix44.create_look_at(self.position, self.position + self.front, self.up)
+    def get_projection_matrix(self) -> Matrix44:
+        return matrix44.create_perspective_projection(self.fov, self.aspect_ratio, self.near_plane, self.far_plane)
+    def process_keyboard(self, direction: str, delta_time: float):
+        velocity = self.movement_speed * delta_time
+        if direction == "FORWARD": self.position += self.front * velocity
+        if direction == "BACKWARD": self.position -= self.front * velocity
+        if direction == "LEFT": self.position -= self.right * velocity
+        if direction == "RIGHT": self.position += self.right * velocity
+        if direction == "UP": self.position += self.world_up * velocity
+        if direction == "DOWN": self.position -= self.world_up * velocity
+    def process_mouse_movement(self, x_offset: float, y_offset: float, constrain_pitch: bool = True):
         self.yaw += x_offset * self.mouse_sensitivity
-        self.pitch -= y_offset * self.mouse_sensitivity
-
-        if constrain_pitch:
-            self.pitch = max(-89.0, min(89.0, self.pitch))
-        
-        self.update_vectors()
+        self.pitch += y_offset * self.mouse_sensitivity
+        if constrain_pitch: self.pitch = max(-89.0, min(89.0, self.pitch))
+        self.update_camera_vectors()
+    def update_camera_vectors(self):
+        new_front = Vector3([0.0, 0.0, 0.0])
+        new_front.x = math.cos(math.radians(self.yaw)) * math.cos(math.radians(self.pitch))
+        new_front.y = math.sin(math.radians(self.pitch))
+        new_front.z = math.sin(math.radians(self.yaw)) * math.cos(math.radians(self.pitch))
+        self.front = vector.normalise(new_front)
+        self.right = vector.normalise(vector3.cross(self.front, self.world_up))
+        self.up = vector.normalise(vector3.cross(self.right, self.front))

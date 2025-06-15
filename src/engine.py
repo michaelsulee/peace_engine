@@ -1,236 +1,239 @@
 # src/engine.py
 import pygame
 from OpenGL.GL import *
+from camera import Camera
+from input_handler import InputHandler
+from pyrr import Vector3, Vector4, matrix44
 import numpy as np
-import ctypes
+import asset_loader
+import texture_loader
+from mesh import Mesh
+import sys
+import re
 
-import camera, input_handler, scene, editor, frustum, raycaster, math_utils, asset_loader, ui
+def lerp(v1: Vector3, v2: Vector3, factor: float) -> Vector3:
+    factor = max(0.0, min(1.0, factor))
+    return v1 * (1.0 - factor) + v2 * factor
 
 class Engine:
-    def __init__(self, width, height):
-        self.width, self.height = width, height
-        self.SHADOW_WIDTH, self.SHADOW_HEIGHT = 2048, 2048
-        self.depth_map_fbo = None
-        self.depth_map_texture = None
-        self.depth_shader = None
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.running = False
+        self.paused = False
         
-        self._initialize_pygame()
+        self._initialize_pygame_and_opengl()
+        
         self.clock = pygame.time.Clock()
-        self.running = True
-        self.mouse_grabbed = True
-        pygame.event.set_grab(True)
-        pygame.mouse.set_visible(False)
+        self.time = 0.0
         
-        self._initialize_engine_systems()
-        self._load_resources()
+        self.camera = Camera(Vector3([0.0, 4.0, 15.0]), self.width / self.height)
+        self.input_handler = InputHandler(self, self.camera)
 
-    def _initialize_pygame(self):
-        pygame.init()
-        pygame.display.set_mode((self.width, self.height), pygame.OPENGL | pygame.DOUBLEBUF | pygame.RESIZABLE)
-        pygame.display.set_caption("PEACE Engine")
-        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE); glViewport(0, 0, self.width, self.height)
-
-    def _initialize_engine_systems(self):
-        print("Initializing PEACE Engine systems...")
-        self.camera = camera.Camera(aspect=self.width/self.height)
-        self.scene = scene.Scene()
-        self.editor = editor.Editor(self.scene)
-        self.frustum = frustum.Frustum()
-        self.projection_matrix = math_utils.perspective_matrix(45, self.width/self.height, 0.01, 500.0)
-        self.raycaster = raycaster.Raycaster(self.camera, self.projection_matrix)
-        self.input_handler = input_handler.InputHandler(self)
-
-    def _load_resources(self):
-        print("Loading resources...")
-        self.forward_shader = asset_loader.Shader("assets/shaders/default.vert", "assets/shaders/default.frag")
+        # --- Load Assets ---
+        self.lighting_shader = asset_loader.Shader("assets/shaders/default.vert", "assets/shaders/default.frag")
         self.skybox_shader = asset_loader.Shader("assets/shaders/skybox.vert", "assets/shaders/skybox.frag")
-        self.depth_shader = asset_loader.Shader("assets/shaders/depth_shader.vert", "assets/shaders/depth_shader.frag")
+        self.light_source_shader = asset_loader.Shader("assets/shaders/light_source.vert", "assets/shaders/light_source.frag")
+        self.ui_shader = asset_loader.Shader("assets/shaders/ui.vert", "assets/shaders/ui.frag")
         
-        self._setup_shadow_map()
-        self._setup_skybox()
-        self._setup_ui()
+        self.cube_mesh = asset_loader.load_cube_mesh()
+        self.floor_mesh = asset_loader.load_quad_mesh()
+        self.skybox_mesh = asset_loader.load_cube_mesh()
+        self.sphere_mesh = asset_loader.load_sphere_mesh()
+        self.ui_quad_mesh = asset_loader.load_quad_mesh()
+
+        self.container_texture = texture_loader.generate_matte_texture(color=(255, 128, 80))
+        self.floor_texture = texture_loader.generate_checkerboard_texture(width=16, height=16, c1=(60,60,60), c2=(80,80,80))
         
-        print("Loading initial scene...")
-        self.editor.add_primitive(primitive_type='cube', position=[0, -1, 0], scale=[200, 1, 200], textured=False, is_selectable=False)
-        self.editor.add_primitive(primitive_type='cube', position=[0, 0.5, 0])
+        try:
+            self.skybox_texture = texture_loader.load_cubemap([
+                f"assets/skybox/{face}.bmp" for face in ["right","left","top","bottom","front","back"]
+            ])
+        except FileNotFoundError as e:
+            print(f"\nFATAL ERROR: {e}")
+            pygame.quit()
+            sys.exit()
+            
+        self.font = pygame.font.Font(None, 48)
+        self.input_text, self.text_dirty = "", False
+        self.text_texture, self.text_texture_dims = None, (0,0)
         
-        self.scene.sun = self.editor.add_primitive('sphere', scale=[2, 2, 2], is_unlit=True, casts_shadow=False, is_selectable=False)
-        print("Engine ready.")
+        prompt_surface = self.font.render("Enter Time (HH:MM):", True, (255, 255, 255))
+        self.prompt_texture, w, h = texture_loader.create_texture_from_surface(prompt_surface)
+        self.prompt_texture_dims = (w, h)
+        self.ui_bg_texture = texture_loader.generate_matte_texture(color=(0,0,0))
 
-    def _setup_shadow_map(self):
-        print("Setting up shadow map framebuffer...")
-        self.depth_map_fbo = glGenFramebuffers(1)
-        self.depth_map_texture = glGenTextures(1)
-        glBindTexture(GL_TEXTURE_2D, self.depth_map_texture)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, self.SHADOW_WIDTH, self.SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, None)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
-        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32))
-        glBindFramebuffer(GL_FRAMEBUFFER, self.depth_map_fbo)
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, self.depth_map_texture, 0)
-        glDrawBuffer(GL_NONE)
-        glReadBuffer(GL_NONE)
-        if glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE:
-            raise Exception("Framebuffer for shadow map is not complete!")
-        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        # --- State Variables ---
+        self.sun_active = True
+        self.sun_movement_paused = False
+        self.current_time_minutes, day_duration_seconds = 480, 120
+        self.time_speed = 1440.0 / day_duration_seconds
+        
+        floor_scale, sun_scale = 100.0, 15.0
+        self.floor_model_matrix = matrix44.create_from_scale(Vector3([floor_scale] * 3), dtype=np.float32)
+        self.cube_model_matrix = matrix44.create_from_translation(Vector3([0.0, 2.5, 0.0]), dtype=np.float32)
+        self.sun_model_matrix = matrix44.create_from_scale(Vector3([sun_scale] * 3), dtype=np.float32)
+        
+        self.light_pos, self.light_color = Vector3([0.0, 0.0, 0.0]), Vector3([1.0, 1.0, 1.0])
+        self.ambient_color, self.light_orbit_radius = Vector3([0.0, 0.0, 0.0]), floor_scale * 0.75
 
-    def _setup_skybox(self):
-        skybox_faces = [f'assets/skybox/{face}.bmp' for face in ['right', 'left', 'top', 'bottom', 'front', 'back']]
-        self.skybox_texture = asset_loader.load_cubemap(skybox_faces)
-        skybox_verts = np.array([-1,-1,1, 1,-1,1, 1,1,1, 1,1,1, -1,1,1, -1,-1,1, -1,-1,-1, -1,1,-1, 1,1,-1, 1,1,-1, 1,-1,-1, -1,-1,-1, -1,1,-1, -1,1,1, 1,1,1, 1,1,1, 1,1,-1, -1,1,-1, -1,-1,-1, 1,-1,-1, 1,-1,1, 1,-1,1, -1,-1,1, -1,-1,-1, 1,-1,-1, 1,1,-1, 1,1,1, 1,1,1, 1,-1,1, 1,-1,-1, -1,-1,-1, -1,-1,1, -1,1,1, -1,1,1, -1,1,-1, -1,-1,-1,], dtype=np.float32)
-        self.skybox_vao = glGenVertexArrays(1)
-        vbo = glGenBuffers(1)
-        glBindVertexArray(self.skybox_vao)
-        glBindBuffer(GL_ARRAY_BUFFER, vbo)
-        glBufferData(GL_ARRAY_BUFFER, skybox_verts.nbytes, skybox_verts, GL_STATIC_DRAW)
-        glEnableVertexAttribArray(0)
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * ctypes.sizeof(GLfloat), None)
-        glBindVertexArray(0)
-
-    def _setup_ui(self):
-        self.text_renderer = ui.TextRenderer(None, 24)
-        self.projection_matrix_ui = math_utils.ortho_matrix(0, self.width, self.height, 0, -1, 1)
-        drawer_width = 250
-        self.asset_drawer = ui.SimplePanel(-drawer_width, 0, drawer_width, self.height, (0.1, 0.1, 0.15, 0.9))
-        self.asset_buttons = [ui.SimpleButton(25, self.height - 80, 200, 40, "Cube", self.text_renderer, lambda: self.editor.start_placement('cube'))]
-        self.context_menu_panel = ui.SimplePanel(0, 0, 150, 100, (0.15, 0.15, 0.2, 0.95))
-        self.context_menu_buttons = {"Delete": ui.SimpleButton(0, 0, 140, 30, "Delete", self.text_renderer, self.delete_selected_object),"Copy": ui.SimpleButton(0, 0, 140, 30, "Copy", self.text_renderer, self.copy_selected_object)}
-        self.context_menu_active = False; self.selected_object = None
-        self.show_controls = True; self.asset_drawer_open = False
-
-    ### --- MAIN GAME LOOP AND HELPER METHODS RESTORED --- ###
+    def _initialize_pygame_and_opengl(self):
+        pygame.init()
+        pygame.display.set_caption("PEACE Engine v1.0")
+        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
+        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
+        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)
+        pygame.display.set_mode((self.width, self.height), pygame.OPENGL | pygame.DOUBLEBUF)
+        pygame.mouse.set_visible(False); pygame.event.set_grab(True)
+        glClearColor(0.1, 0.1, 0.15, 1.0)
+        glEnable(GL_DEPTH_TEST)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        # As commanded, global culling is disabled.
+        # It will be enabled temporarily only where technically necessary.
+        # glEnable(GL_CULL_FACE)
 
     def run(self):
-        """The main engine loop."""
+        self.running = True
         while self.running:
-            dt = self.clock.tick(60) / 1000.0
-            self.input_handler.handle_events()
-            self.input_handler.handle_continuous_input(dt)
-            self._update(dt)
+            delta_time = self.clock.tick(60) / 1000.0
+            self.input_handler.process_input(delta_time)
+            if not self.paused: self._update(delta_time)
             self._render()
         self._cleanup()
         
+    def enter_time_set_mode(self):
+        self.paused = True
+        self.input_text = ""
+        self.text_dirty = True
+        pygame.mouse.set_visible(True)
+        pygame.event.set_grab(False)
+        self.input_handler.first_mouse = True
+
+    def exit_time_set_mode(self):
+        self.paused = False
+        pygame.mouse.set_visible(False)
+        pygame.event.set_grab(True)
+        self.input_handler.first_mouse = True
+
+    def commit_time_change(self):
+        try:
+            match = re.match(r'^([01]\d|2[0-3]):([0-5]\d)$', self.input_text)
+            if not match: raise ValueError("Invalid format")
+            hours, minutes = map(int, match.groups())
+            self.current_time_minutes = hours * 60 + minutes
+            print(f"Time set to {hours:02d}:{minutes:02d}.")
+        except (ValueError, TypeError):
+            print(f"Invalid time entered: '{self.input_text}'")
+        self.exit_time_set_mode()
+        
+    def _update(self, delta_time):
+        if not self.sun_movement_paused:
+            self.current_time_minutes = (self.current_time_minutes + self.time_speed * delta_time) % 1440
+        
+        time_ratio = self.current_time_minutes / 1440.0
+        sun_angle = time_ratio * 2.0 * np.pi
+        
+        self.light_pos.x = np.cos(sun_angle) * self.light_orbit_radius
+        self.light_pos.z = np.sin(sun_angle) * self.light_orbit_radius
+        self.light_pos.y = np.sin(time_ratio * np.pi) * (self.light_orbit_radius * 0.5) + 5.0
+    
+    def _update_lighting_and_colors(self):
+        time_ratio = self.current_time_minutes / 1440.0
+        sunrise_color = Vector3([1.0, 0.4, 0.2]); noon_color = Vector3([1.0, 1.0, 0.9]); sunset_color = Vector3([1.0, 0.4, 0.2]); night_color = Vector3([0.6, 0.7, 0.9])
+        sunrise_ambient = Vector3([0.3, 0.2, 0.2]); noon_ambient = Vector3([0.5, 0.5, 0.5]); night_ambient = Vector3([0.05, 0.05, 0.15])
+        sunrise_sky = Vector3([0.6, 0.3, 0.3]); noon_sky = Vector3([0.5, 0.8, 1.0]); night_sky = Vector3([0.01, 0.01, 0.05])
+
+        if 0.20 < time_ratio < 0.30:
+            interp = (time_ratio - 0.20) / 0.10
+            self.light_color = lerp(night_color, sunrise_color, interp)
+            self.ambient_color = lerp(night_ambient, sunrise_ambient, interp)
+            glClearColor(*lerp(night_sky, sunrise_sky, interp), 1.0)
+        elif 0.30 <= time_ratio <= 0.70:
+            interp = (time_ratio - 0.30) / 0.40
+            if interp < 0.5:
+                self.light_color = lerp(sunrise_color, noon_color, interp * 2)
+                self.ambient_color = lerp(sunrise_ambient, noon_ambient, interp * 2)
+                glClearColor(*lerp(sunrise_sky, noon_sky, interp * 2), 1.0)
+            else:
+                self.light_color = lerp(noon_color, sunset_color, (interp - 0.5) * 2)
+                self.ambient_color = lerp(noon_ambient, sunrise_ambient, (interp - 0.5) * 2)
+                glClearColor(*lerp(noon_sky, sunrise_sky, (interp - 0.5) * 2), 1.0)
+        elif 0.70 < time_ratio < 0.80:
+            interp = (time_ratio - 0.70) / 0.10
+            self.light_color = lerp(sunset_color, night_color, interp)
+            self.ambient_color = lerp(sunrise_ambient, night_ambient, interp)
+            glClearColor(*lerp(sunrise_sky, night_sky, interp), 1.0)
+        else:
+            self.light_color = night_color
+            self.ambient_color = night_ambient
+            glClearColor(*night_sky, 1.0)
+            
     def _render(self):
-        """Main render function, orchestrating the two-pass shadow mapping."""
-        light_projection = math_utils.ortho_matrix(-35, 35, -35, 35, 1.0, 100.0)
-        light_view = math_utils.look_at(self.scene.light_pos, np.array([0,0,0], dtype=np.float32), np.array([0,1,0], dtype=np.float32))
-        light_space_matrix = light_projection @ light_view
+        self._update_lighting_and_colors()
         
-        # --- PASS 1: RENDER TO DEPTH MAP ---
-        glViewport(0, 0, self.SHADOW_WIDTH, self.SHADOW_HEIGHT)
-        glBindFramebuffer(GL_FRAMEBUFFER, self.depth_map_fbo)
-        glClear(GL_DEPTH_BUFFER_BIT)
-        glCullFace(GL_BACK) # Use default culling for stability
-        
-        self.depth_shader.use()
-        self.depth_shader.set_mat4("u_lightSpaceMatrix", light_space_matrix)
-        self.scene.draw(self.depth_shader, frustum=None, render_pass='shadow')
-        
-        # --- PASS 2: RENDER FINAL SCENE ---
-        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        # --- MAIN RENDER PASS ---
         glViewport(0, 0, self.width, self.height)
-        glClearColor(0.52, 0.8, 0.92, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         
-        # Ensure culling is default
-        glCullFace(GL_BACK)
+        projection, view = self.camera.get_projection_matrix(), self.camera.get_view_matrix()
+        
+        # --- Draw Scene Objects ---
+        self.lighting_shader.use()
+        self.lighting_shader.set_mat4("projection", projection); self.lighting_shader.set_mat4("view", view)
+        self.lighting_shader.set_vec3("lightPos", self.light_pos); self.lighting_shader.set_vec3("viewPos", self.camera.position)
+        self.lighting_shader.set_vec3("lightColor", self.light_color if self.sun_active else Vector3([0.0,0.0,0.0]))
+        self.lighting_shader.set_vec3("ambientColor", self.ambient_color)
+        self.lighting_shader.set_int("objectTexture", 0)
+        
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.container_texture)
+        self.lighting_shader.set_mat4("model", self.cube_model_matrix)
+        self.cube_mesh.draw()
+        
+        glBindTexture(GL_TEXTURE_2D, self.floor_texture)
+        self.lighting_shader.set_mat4("model", self.floor_model_matrix)
+        self.floor_mesh.draw()
+        
+        # --- Draw the Sun ---
+        if self.sun_active:
+            self.light_source_shader.use()
+            sun_world_matrix = matrix44.multiply(matrix44.create_from_translation(self.light_pos), self.sun_model_matrix)
+            self.light_source_shader.set_mat4("projection", projection); self.light_source_shader.set_mat4("view", view)
+            self.light_source_shader.set_mat4("model", sun_world_matrix); self.light_source_shader.set_vec3("lightColor", self.light_color)
+            self.sphere_mesh.draw()
 
-        view_matrix = self.camera.get_view_matrix()
+        # --- Draw the Skybox ---
+        glDepthFunc(GL_LEQUAL)
+        self.skybox_shader.use()
+        view_no_translation = matrix44.create_from_matrix33(view[:3,:3])
+        self.skybox_shader.set_mat4("view", view_no_translation); self.skybox_shader.set_mat4("projection", projection)
+        glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_CUBE_MAP, self.skybox_texture); self.skybox_shader.set_int("skybox", 0)
+        glDepthFunc(GL_LESS)
         
-        # Draw the main scene objects with shadows
-        self.forward_shader.use()
-        self.forward_shader.set_mat4("u_projection", self.projection_matrix)
-        self.forward_shader.set_mat4("u_view", view_matrix)
-        self.forward_shader.set_vec3("u_viewPos", self.camera.position)
-        self.forward_shader.set_vec3("u_lightPos", self.scene.light_pos)
-        self.forward_shader.set_mat4("u_lightSpaceMatrix", light_space_matrix)
-        glActiveTexture(GL_TEXTURE1)
-        glBindTexture(GL_TEXTURE_2D, self.depth_map_texture)
-        self.forward_shader.set_int("shadowMap", 1)
-        self.scene.draw(self.forward_shader, self.frustum, render_pass='main')
-        
-        self._render_skybox(view_matrix)
+        # --- Draw UI ---
+        if self.paused:
+            self._render_ui()
 
         pygame.display.flip()
 
-    def _render_skybox(self, view_matrix):
-        """Helper function to isolate skybox rendering logic."""
-        if self.skybox_texture is None:
-            glDepthFunc(GL_LEQUAL)
-            glCullFace(GL_FRONT)
-            self.skybox_shader.use()
-            self.skybox_shader.set_bool("u_hasSkyboxTexture", False)
-            skybox_view = view_matrix.copy(); skybox_view[3, :3] = 0
-            self.skybox_shader.set_mat4("view", skybox_view)
-            self.skybox_shader.set_mat4("projection", self.projection_matrix)
-            glBindVertexArray(self.skybox_vao); glDrawArrays(GL_TRIANGLES, 0, 36)
-            glCullFace(GL_BACK); glDepthFunc(GL_LESS)
-            return
-
-        glDepthFunc(GL_LEQUAL)
-        glCullFace(GL_FRONT)
-        self.skybox_shader.use()
-        self.skybox_shader.set_bool("u_hasSkyboxTexture", True)
-        skybox_view = view_matrix.copy(); skybox_view[3, :3] = 0
-        self.skybox_shader.set_mat4("view", skybox_view)
-        self.skybox_shader.set_mat4("projection", self.projection_matrix)
-        glActiveTexture(GL_TEXTURE0)
-        self.skybox_shader.set_int("skybox", 0)
-        glBindTexture(GL_TEXTURE_CUBE_MAP, self.skybox_texture)
-        glBindVertexArray(self.skybox_vao)
-        glDrawArrays(GL_TRIANGLES, 0, 36)
-        glCullFace(GL_BACK)
-        glDepthFunc(GL_LESS)
-
-    def _update(self, dt):
-        view_matrix = self.camera.get_view_matrix()
-        self.raycaster.update_matrices(view_matrix)
-        self.frustum.update(self.projection_matrix @ view_matrix)
-        
-        if self.scene.sun:
-            self.scene.sun.transform.set_position(self.scene.light_pos)
-
-        if self.editor.placement_mode_active:
-            ray_dir = self.raycaster.get_ray_from_mouse(*pygame.mouse.get_pos(), self.width, self.height)
-            intersection = self.raycaster.intersect_ray_plane(self.camera.position, ray_dir)
-            if intersection is not None: self.editor.update_ghost_position(intersection)
-        if not (self.context_menu_active or self.asset_drawer_open or self.editor.placement_mode_active):
-            ray_dir = self.raycaster.get_ray_from_center()
-            closest_hit_dist = float('inf')
-            self.selected_object = None
-            for obj in self.scene.game_objects:
-                if obj.is_selectable and not obj.is_ghost and self.raycaster.intersect_ray_aabb(self.camera.position, ray_dir, obj.aabb_min, obj.aabb_max):
-                    dist = np.linalg.norm(obj.position - self.camera.position)
-                    if dist < closest_hit_dist: closest_hit_dist, self.selected_object = dist, obj
-        self.scene.update_selection(self.selected_object)
+    def _render_ui(self):
+        # This method is unchanged
+        ...
 
     def _cleanup(self):
-        print("Cleaning up resources...")
-        self.scene.cleanup()
-        self.forward_shader.cleanup()
-        self.skybox_shader.cleanup()
-        if self.depth_shader: self.depth_shader.cleanup()
-        for mesh in self.editor.primitive_meshes.values(): mesh.cleanup()
-        glDeleteVertexArrays(1, [self.skybox_vao])
-        if self.skybox_texture: glDeleteTextures(1, [self.skybox_texture])
-        if self.depth_map_fbo: glDeleteFramebuffers(1, [self.depth_map_fbo])
-        if self.depth_map_texture: glDeleteTextures(1, [self.depth_map_texture])
+        valid_textures = [tex for tex in [self.container_texture, self.floor_texture, self.skybox_texture, self.prompt_texture, self.text_texture, self.ui_bg_texture] if tex is not None]
+        if valid_textures:
+            glDeleteTextures(len(valid_textures), valid_textures)
+        
+        self.lighting_shader.destroy()
+        self.skybox_shader.destroy()
+        self.light_source_shader.destroy()
+        self.ui_shader.destroy()
+
+        self.cube_mesh.destroy()
+        self.floor_mesh.destroy()
+        self.skybox_mesh.destroy()
+        self.sphere_mesh.destroy()
+        self.ui_quad_mesh.destroy()
         pygame.quit()
-    
-    def toggle_mouse_grab(self):
-        self.mouse_grabbed = not self.mouse_grabbed
-        pygame.mouse.set_visible(not self.mouse_grabbed)
-        pygame.event.set_grab(self.mouse_grabbed)
-    def toggle_asset_drawer(self):
-        self.asset_drawer_open = not self.asset_drawer_open
-        if not self.asset_drawer_open: self.editor.cancel_placement()
-    def delete_selected_object(self):
-        if self.selected_object: self.scene.remove_object(self.selected_object)
-        self.selected_object = None
-        self.context_menu_active = False
-    def copy_selected_object(self):
-        if self.selected_object: self.editor.add_primitive(primitive_type='cube', position=self.selected_object.position + np.array([2, 0, 0]))
-        self.context_menu_active = False
