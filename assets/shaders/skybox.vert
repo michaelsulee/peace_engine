@@ -1,23 +1,23 @@
 #version 330 core
 
-layout (location = 0) in vec3 a_Position;
+// Declare all attributes that the Mesh class provides to prevent mismatch
+layout (location = 0) in vec3 a_position;
+layout (location = 1) in vec3 a_normal;
+layout (location = 2) in vec2 a_texcoord;
+layout (location = 3) in vec3 a_tangent;
+layout (location = 4) in vec3 a_bitangent;
 
-out vec3 TexCoords;
+out vec3 texCoord;
 
-uniform mat4 projection;
 uniform mat4 view;
+uniform mat4 projection;
 
 void main()
 {
-    TexCoords = a_Position;
+    // We only use the position for the texture coordinate and final position
+    texCoord = a_position;
     
-    // Remove the translation part of the view matrix so the skybox doesn't move
-    mat4 view_no_translation = mat4(mat3(view));
-    
-    // Project the vertex
-    vec4 pos = projection * view_no_translation * vec4(a_Position, 1.0);
-    
-    // Set the z component of the final position to w. This forces the depth value
-    // to be 1.0, the maximum depth, ensuring it's always drawn in the background.
+    // Use the .xyww trick for robust depth rendering
+    vec4 pos = projection * view * vec4(a_position, 1.0);
     gl_Position = pos.xyww;
 }

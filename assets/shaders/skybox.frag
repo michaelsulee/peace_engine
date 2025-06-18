@@ -1,8 +1,14 @@
-// assets/shaders/skybox.frag
 #version 330 core
-out vec4 FragColor;
-in vec3 TexCoords;
+
+layout (location = 0) out vec4 fragColor;
+
+// This input variable now correctly matches the vertex shader's output
+in vec3 texCoord;
+
 uniform samplerCube skybox;
-void main() {    
-    FragColor = texture(skybox, TexCoords);
+
+void main()
+{
+    // Sample the cubemap texture using the direction vector from the vertex shader
+    fragColor = texture(skybox, texCoord);
 }
